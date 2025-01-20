@@ -50,7 +50,8 @@ __global__ void {{ type_map[emb_weight_type].enum_name }}_split_embedding{{ "_no
   const int fp8_exponent_bits,
   const int fp8_exponent_bias,
   {%- endif %}
-  const int32_t num_packed_bags,
+  const int32_t num_packed_bags_D,
+  const int32_t num_packed_bags_L,
   pta::PackedTensorAccessor32<output_t, 2, at::RestrictPtrTraits> output, // [B][total_D],
   const pta::PackedTensorAccessor64<uint8_t, 2, at::RestrictPtrTraits> lxu_cache_weights,
   const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> lxu_cache_locations
@@ -75,12 +76,17 @@ __global__ void {{ type_map[emb_weight_type].enum_name }}_split_embedding{{ "_no
     {%-if is_rocm and not nobag and not weighted %}
     const int32_t num_uint4_loads_per_row = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_D, SparseType::{{ emb_weight_type }}, row_alignment), sizeof(uint4)); \
     constexpr int32_t NumUint4LoadsPerRow = MaxNum128BRows * 128 / sizeof(uint4); \
-    const int32_t num_packed_bags = NumUint4LoadsPerRow > num_uint4_loads_per_row && !std::is_same_v<output_t, uint8_t> && SparseType::{{ emb_weight_type }} != SparseType::FP32 ? NumUint4LoadsPerRow / num_uint4_loads_per_row : 1; \
+    constexpr int32_t max_indices_per_warp = kWarpSize / NumUint4LoadsPerRow; \
+    const int max_L = 100; \
+    const int32_t num_packed_bags_L = max_indices_per_warp > max_L ?  max_indices_per_warp / max_L : 1; \
+    const int32_t num_packed_bags_D = NumUint4LoadsPerRow > num_uint4_loads_per_row && !std::is_same_v<output_t, uint8_t> && SparseType::{{ emb_weight_type }} != SparseType::FP32 ? NumUint4LoadsPerRow / num_uint4_loads_per_row : 1; \
     {%- else %}
-    const int32_t num_packed_bags = 1; \
+    const int32_t num_packed_bags_D = 1; \
+    const int32_t num_packed_bags_L = 1; \
     {%- endif %}
+    const int32_t tot_packed_bags = num_packed_bags_D * num_packed_bags_L; \
     {{ func_name }}<index_t, output_t, OutputRowsPerThread, kWarpsPerBlock, InputRowsInFlight, MinNum128BRows, MaxNum128BRows, DeviceOnly><<< \
-        nbit::div_round_up(T * nbit::div_round_up(B, num_packed_bags * OutputRowsPerThread), kWarpsPerBlock), \
+        nbit::div_round_up(T * nbit::div_round_up(B, tot_packed_bags * OutputRowsPerThread), kWarpsPerBlock), \
         dim3(kWarpSize, kWarpsPerBlock), \
         0, \
         at::cuda::getCurrentCUDAStream()>>>( \
@@ -94,7 +100,7 @@ __global__ void {{ type_map[emb_weight_type].enum_name }}_split_embedding{{ "_no
         {%- else %}
         D, \
         {%- endif %}
-        FixedDivisor(div_round_up(B, num_packed_bags * OutputRowsPerThread)), \
+        FixedDivisor(div_round_up(B, tot_packed_bags * OutputRowsPerThread)), \
         MAKE_PTA_WITH_NAME(func_name_{{ emb_weight_type }}, indices, index_t, 1, 32), \
         MAKE_PTA_WITH_NAME(func_name_{{ emb_weight_type }}, offsets, index_t, 1, 32), \
         {%- if not nobag %}
@@ -108,7 +114,8 @@ __global__ void {{ type_map[emb_weight_type].enum_name }}_split_embedding{{ "_no
         fp8_exponent_bits, \
         fp8_exponent_bias, \
         {%- endif %}
-        num_packed_bags, \
+        num_packed_bags_D, \
+        num_packed_bags_L, \
         MAKE_PTA_WITH_NAME(func_name_{{ emb_weight_type }}, output, output_t, 2, 32), \
         MAKE_PTA_WITH_NAME(func_name_{{ emb_weight_type }}, lxu_cache_weights, uint8_t, 2, 64), \
         MAKE_PTA_WITH_NAME(func_name_{{ emb_weight_type }}, lxu_cache_locations, int32_t, 1, 32) \
