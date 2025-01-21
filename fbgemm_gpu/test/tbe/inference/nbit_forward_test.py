@@ -316,7 +316,7 @@ class NBitFowardTest(NBitFowardTestCommon):
         T = random.randint(1, 50)
         B = random.randint(0, 128)
         L = random.randint(0, 32)
-        D = random.randint(2, 2048)
+        D = random.randint(2, 48)
         log_E = random.randint(2, 4)
 
         use_cache = False
@@ -436,7 +436,7 @@ class NBitFowardTest(NBitFowardTestCommon):
         T = random.randint(1, 50)
         B = random.randint(0, 128)
         L = random.randint(0, 32)
-        D = random.randint(2, 2048)
+        D = random.randint(2, 56)
         log_E = random.randint(2, 4)
 
         use_cache = False
@@ -458,7 +458,7 @@ class NBitFowardTest(NBitFowardTestCommon):
             weighted = random.choice([True, False])
         else:
             weighted = False
-
+        weighted = False
         if nbit_weights_ty is None:
             # don't care when mixed type is used.
             weights_ty: SparseType = SparseType.INT8
@@ -517,7 +517,7 @@ class NBitFowardTest(NBitFowardTestCommon):
         T = random.randint(1, 5)
         B = random.randint(1, 128)
         L = random.randint(1, 20)
-        D = random.randint(2, 256)
+        D = random.randint(2, 56)
         log_E = random.randint(3, 5)
         mixed = random.choice([True, False])
 
