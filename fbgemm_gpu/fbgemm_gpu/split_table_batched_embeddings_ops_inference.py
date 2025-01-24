@@ -469,6 +469,8 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
                 ],
                 default=0,
             )
+        
+
 
         self.max_int2_D: int = max_ty_D(SparseType.INT2)
         self.max_int4_D: int = max_ty_D(SparseType.INT4)
@@ -476,7 +478,6 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         self.max_float8_D: int = max_ty_D(SparseType.FP8)
         self.max_float16_D: int = max_ty_D(SparseType.FP16)
         self.max_float32_D: int = max_ty_D(SparseType.FP32)
-
         self.register_buffer(
             "D_offsets",
             torch.tensor(D_offsets, device=self.current_device, dtype=torch.int32),
@@ -932,7 +933,9 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         indices, offsets, per_sample_weights = inputs_to_device(
             indices, offsets, per_sample_weights, self.bounds_check_warning.device
         )
-
+        bag_sizes = offsets[1:] - offsets[:-1]
+        max_Ls = bag_sizes.max()
+        print("Maximum bag size:", max_Ls.item())
         # First bound check: check if the indices/offsets are within the boundary
         # of the original embedding rows before pruning.
         # Note that this is only applied when we enable pruning (if the perf becomes
@@ -1009,6 +1012,7 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
             max_int8_D=self.max_int8_D,
             max_float16_D=self.max_float16_D,
             max_float32_D=self.max_float32_D,
+            max_Ls = max_Ls,
             indices=indices,
             offsets=offsets,
             pooling_mode=int(self.pooling_mode),
@@ -1019,7 +1023,7 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
             row_alignment=self.row_alignment,
             max_float8_D=self.max_float8_D,
             fp8_exponent_bits=self.fp8_exponent_bits,
-            fp8_exponent_bias=self.fp8_exponent_bias,
+            fp8_exponent_bias=self.fp8_exponent_bias
         )
 
     def forward(
@@ -1028,6 +1032,8 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         offsets: Tensor,
         per_sample_weights: Optional[Tensor] = None,
     ) -> Tensor:
+        # print(offsets)
+\
         return self._forward_impl(
             indices=indices, offsets=offsets, per_sample_weights=per_sample_weights
         )
