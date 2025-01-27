@@ -338,7 +338,7 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
     if constexpr (std::is_same_v<output_t, float> || std::is_same_v<output_t, at::Half> || std::is_same_v<output_t, at::BFloat16>) {
       #pragma unroll MaxNum128BRows
       for (uint32_t j = 0; j < MaxNum128BRows; ++j) {
-        const int32_t output_d =() kWarpSize * j * kOutputsPerThread) + (threadIdx.x * kOutputsPerThread) - D_padding - (packed_bag_idx_D * kOutputsPerThread * num_stores_with_padding_per_row);
+        const int32_t output_d =kWarpSize * j * kOutputsPerThread + threadIdx.x * kOutputsPerThread - D_padding - packed_bag_idx_D * kOutputsPerThread * num_stores_with_padding_per_row;
         accumulators[i][j].mul(inv_L);
 
         if (output_d >= 0 && output_d < D && packed_bag_idx_D < num_packed_bags_D) {
