@@ -478,6 +478,7 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         self.max_float8_D: int = max_ty_D(SparseType.FP8)
         self.max_float16_D: int = max_ty_D(SparseType.FP16)
         self.max_float32_D: int = max_ty_D(SparseType.FP32)
+        print( self.max_int2_D, self.max_int4_D, self.max_int8_D, self.max_float8_D, self.max_float16_D, self.max_float32_D)
         self.register_buffer(
             "D_offsets",
             torch.tensor(D_offsets, device=self.current_device, dtype=torch.int32),
@@ -934,8 +935,64 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
             indices, offsets, per_sample_weights, self.bounds_check_warning.device
         )
         bag_sizes = offsets[1:] - offsets[:-1]
+
         max_Ls = bag_sizes.max()
-        print("Maximum bag size:", max_Ls.item())
+        print("Maximum bag size:", max_Ls)
+        max_ls_tys = []
+        weights_tys: List[SparseType] = [e[3] for e in self.embedding_specs]
+        def find_max_ls(ty: SparseType):
+            bag_sizes = None
+            for type_ in weights_tys:
+                print(type_, ty)
+                if type_ == ty or type_.value == ty.value:
+                    bag_sizes = offsets[1:] - offsets[:-1]
+                    return bag_sizes.max()
+                
+            return 0
+        type_list  = [SparseType.INT2, SparseType.INT4, SparseType.INT8, SparseType.FP8, SparseType.FP16, SparseType.FP32]
+        INT2_max_ls = find_max_ls(SparseType.INT2))
+        INT4_max_ls = find_max_ls(SparseType.INT4))
+        INT8_max_ls = find_max_ls(SparseType.INT8))
+        FP8_max_ls = find_max_ls(SparseType.FP8))
+        FP16_max_ls = find_max_ls(SparseType.FP16))
+        FP32_max_ls = find_max_ls(SparseType.FP32))
+
+        # print("res: ", find_max_ls(SparseType.INT2))                
+        # print("res: ", find_max_ls(SparseType.INT4))
+        # print("res: ", find_max_ls(SparseType.INT8))
+        # print("res: ", find_max_ls(SparseType.FP8))
+        # print("res: ", find_max_ls(SparseType.FP16))
+        # print("res: ", find_max_ls(SparseType.FP32))
+
+
+        # type_list  = [SparseType.INT2, SparseType.INT4, SparseType.INT8, SparseType.FP8, SparseType.FP16, SparseType.FP32]
+        # # for i in range(len(type_list)):
+        # #     bag_sizes = offsets[1:] - offsets[:-1]
+        # for weight_ty in weights_tys:
+        #     print(weight_ty)
+        #     bag_sizes = offsets[1:] - offsets[:-1]
+        #     max((bag_sizes.max()) if  weight_ty.value == ty.value else  max_ls_tys.append(0)
+        #     # weight_ty.value == ty.value
+        # print(max_ls_tys)
+
+
+    
+        #  def max_ty_D(ty: SparseType) -> int:
+        #     return max(
+        #         [
+        #             dim
+        #             for dim, weight_ty in zip(dims, weights_tys)
+        #             if weight_ty == ty or weight_ty.value == ty.value
+        #         ],
+        #         default=0,
+        #     )
+        
+
+
+        # self.max_int2_D: int = max_ty_D(SparseType.INT2)
+        # self.max_int4_D: int = max_ty_D(SparseType.INT4)
+
+
         # First bound check: check if the indices/offsets are within the boundary
         # of the original embedding rows before pruning.
         # Note that this is only applied when we enable pruning (if the perf becomes
@@ -1012,7 +1069,12 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
             max_int8_D=self.max_int8_D,
             max_float16_D=self.max_float16_D,
             max_float32_D=self.max_float32_D,
-            max_Ls = max_Ls,
+            INT2_max_ls=INT2_max_ls,
+            INT4_max_ls=INT4_max_ls,
+            INT8_max_ls=INT8_max_ls,
+            FP8_max_ls = FP8_max_ls
+            FP16_max_ls=FP16_max_ls,
+            FP32_max_ls=FP32_max_ls,
             indices=indices,
             offsets=offsets,
             pooling_mode=int(self.pooling_mode),
