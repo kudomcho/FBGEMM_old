@@ -106,7 +106,7 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
   for (uint32_t i = 0; i < OutputRowsPerThread; ++i) {
     const uint32_t packed_bag_idx_D = num_packed_bags_D > 1 ? (threadIdx.x % NumUint4LoadsPerRow) / uint4_loads_per_row : 0;
     const uint32_t packed_bag_idx_L = num_packed_bags_L > 1 ? (threadIdx.x / NumUint4LoadsPerRow) / bag_size_offset : 0;
-     const uint32_t packed_bag_idx = (packed_bag_idx_L * num_packed_bags_D) + packed_bag_idx_D;
+    const uint32_t packed_bag_idx = (packed_bag_idx_L * num_packed_bags_D) + packed_bag_idx_D;
     uint32_t b = min(static_cast<uint32_t>(bb * tot_num_packed_bags * OutputRowsPerThread + i * tot_num_packed_bags + packed_bag_idx), static_cast<uint32_t>(B - 1));
     int32_t indices_start = offsets[t * B + b];
     int32_t indices_end = offsets[t * B + b + 1];
@@ -125,7 +125,7 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
   }
 
   {% if not nobag %}
-  VecNT<{{ (32 // emb_weight_type.bit_width) }}, PrimitiveType::{{ emb_weight_type.primitive_type }}> accumulators[OutputRowsPerThread][MaxNum128BRows * (7+MaxNum128BRows)/MaxNum128BRows];
+  VecNT<{{ (32 // emb_weight_type.bit_width) }}, PrimitiveType::{{ emb_weight_type.primitive_type }}> accumulators[OutputRowsPerThread][MaxNum128BRows];
   {% endif %}
 
   for (uint32_t L_start = 0; L_start < max_Ls; L_start += InputRowsInFlight) {
@@ -138,12 +138,20 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
     typedef float AllIndiceWeights[WarpsPerBlock][OutputRowsPerThread][InputRowsInFlight];
     __shared__ AllIndiceWeights buffers_indice_weights;
     {% endif %}
-
-    for (uint32_t load_idx = threadIdx.x; load_idx < input_rows_in_flight * NumUint4LoadsPerRow; load_idx += kWarpSize) {
+  //                                            NumUint4LoadsPerRow = 32
+  
+    uint32_t input_row_idx = 0;
+    for (uint32_t load_idx = threadIdx.x; load_idx < input_rows_in_flight * num_packed_bags_L * NumUint4LoadsPerRow; load_idx += kWarpSize) {
       uint32_t row_load_idx = load_idx % NumUint4LoadsPerRow % uint4_loads_per_row;
-      uint32_t input_row_idx = (load_idx / NumUint4LoadsPerRow) % bag_size_offset;
-      const uint32_t packed_bag_idx_D = (threadIdx.x % NumUint4LoadsPerRow) / uint4_loads_per_row;
-      const uint32_t packed_bag_idx_L = (threadIdx.x / NumUint4LoadsPerRow) / bag_size_offset;
+            //  To do: write the condition of bag_size_offset depending on num_packed_bags_L
+      if (num_packed_bags_L>1){
+        input_row_idx = (load_idx / NumUint4LoadsPerRow) % bag_size_offset; // 63/32 = 1% 1 = 0
+      }
+      else{
+        input_row_idx = (load_idx / NumUint4LoadsPerRow); // 63/32 = 1% 1 = 0
+      }
+      const uint32_t packed_bag_idx_D = num_packed_bags_D > 1 ? (threadIdx.x % NumUint4LoadsPerRow) / uint4_loads_per_row : 0;
+      const uint32_t packed_bag_idx_L = num_packed_bags_L > 1 ? (threadIdx.x / NumUint4LoadsPerRow) / bag_size_offset : 0;
       bool load_idx_valid = packed_bag_idx_D < num_packed_bags_D && packed_bag_idx_L < num_packed_bags_L;
       {%- if is_rocm %}
       constexpr uint32_t kMaxRowUnroll = 4;
