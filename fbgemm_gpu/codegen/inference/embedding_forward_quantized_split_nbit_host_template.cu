@@ -78,7 +78,6 @@ __global__ void {{ type_map[emb_weight_type].enum_name }}_split_embedding{{ "_no
     constexpr int32_t NumUint4LoadsPerRow = MaxNum128BRows * 128 / sizeof(uint4); \
     constexpr int32_t max_indices_per_warp = kWarpSize / NumUint4LoadsPerRow; \
     const int64_t max_L = max_Ls; \
-    printf("max ls is: %d", max_L); \
     const int32_t num_packed_bags_L = max_indices_per_warp > max_L ?  max_indices_per_warp / max_L : 1; \
     const int32_t num_packed_bags_D = NumUint4LoadsPerRow > num_uint4_loads_per_row && !std::is_same_v<output_t, uint8_t> && SparseType::{{ emb_weight_type }} != SparseType::FP32 ? NumUint4LoadsPerRow / num_uint4_loads_per_row : 1; \
     const int32_t num_packed_bags = NumUint4LoadsPerRow > num_uint4_loads_per_row && !std::is_same_v<output_t, uint8_t> && SparseType::{{ emb_weight_type }} != SparseType::FP32 ? NumUint4LoadsPerRow / num_uint4_loads_per_row : 1; \
