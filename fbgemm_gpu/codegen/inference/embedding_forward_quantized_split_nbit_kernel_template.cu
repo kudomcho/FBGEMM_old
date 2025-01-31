@@ -105,7 +105,7 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
   // const int32_t bag_d = kWarpSize/num_packed_bags_L; // num_packed_bags_L can be {1, 2, 4, 8}
   for (uint32_t i = 0; i < OutputRowsPerThread; ++i) {
     const uint32_t packed_bag_idx_D = num_packed_bags_D > 1 ? (threadIdx.x % NumUint4LoadsPerRow) / uint4_loads_per_row : 0;
-    const uint32_t packed_bag_idx_L = num_packed_bags_L > 1 ? (threadIdx.x / NumUint4LoadsPerRow) / bag_size_offset : 0;
+    const uint32_t packed_bag_idx_L = num_packed_bags_L > 1 ? (threadIdx.x / NumUint4LoadsPerRow) / bag_size_offset : 0; // 63/8/2 = 7/2 = 3
     const uint32_t packed_bag_idx = (packed_bag_idx_L * num_packed_bags_D) + packed_bag_idx_D;
     uint32_t b = min(static_cast<uint32_t>(bb * tot_num_packed_bags * OutputRowsPerThread + i * tot_num_packed_bags + packed_bag_idx), static_cast<uint32_t>(B - 1));
     int32_t indices_start = offsets[t * B + b];
@@ -139,17 +139,14 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
     __shared__ AllIndiceWeights buffers_indice_weights;
     {% endif %}
   //                                            NumUint4LoadsPerRow = 32
-  
+    
     uint32_t input_row_idx = 0;
     for (uint32_t load_idx = threadIdx.x; load_idx < input_rows_in_flight * num_packed_bags_L * NumUint4LoadsPerRow; load_idx += kWarpSize) {
       uint32_t row_load_idx = load_idx % NumUint4LoadsPerRow % uint4_loads_per_row;
             //  To do: write the condition of bag_size_offset depending on num_packed_bags_L
-      if (num_packed_bags_L>1){
-        input_row_idx = (load_idx / NumUint4LoadsPerRow) % bag_size_offset; // 63/32 = 1% 1 = 0
-      }
-      else{
-        input_row_idx = (load_idx / NumUint4LoadsPerRow); // 63/32 = 1% 1 = 0
-      }
+   
+      input_row_idx = num_packed_bags_L>1? (load_idx / NumUint4LoadsPerRow) % bag_size_offset: (load_idx / NumUint4LoadsPerRow); // 63/32 = 1% 1 = 0
+      
       const uint32_t packed_bag_idx_D = num_packed_bags_D > 1 ? (threadIdx.x % NumUint4LoadsPerRow) / uint4_loads_per_row : 0;
       const uint32_t packed_bag_idx_L = num_packed_bags_L > 1 ? (threadIdx.x / NumUint4LoadsPerRow) / bag_size_offset : 0;
       bool load_idx_valid = packed_bag_idx_D < num_packed_bags_D && packed_bag_idx_L < num_packed_bags_L;
