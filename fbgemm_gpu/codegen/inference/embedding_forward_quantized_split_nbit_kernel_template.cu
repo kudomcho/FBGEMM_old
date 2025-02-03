@@ -125,7 +125,11 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
   }
 
   {% if not nobag %}
-  VecNT<{{ (32 // emb_weight_type.bit_width) }}, PrimitiveType::{{ emb_weight_type.primitive_type }}> accumulators[OutputRowsPerThread][MaxNum128BRows];
+    {% if PackedMode %}
+      VecNT<{{ (32 // emb_weight_type.bit_width) }}, PrimitiveType::{{ emb_weight_type.primitive_type }}> accumulators[OutputRowsPerThread][MaxNum128BRows*(7+MaxNum128BRows)/MaxNum128BRows];
+    {% else %}
+      VecNT<{{ (32 // emb_weight_type.bit_width) }}, PrimitiveType::{{ emb_weight_type.primitive_type }}> accumulators[OutputRowsPerThread][MaxNum128BRows];
+    {% endif %}
   {% endif %}
 
   for (uint32_t L_start = 0; L_start < max_Ls; L_start += InputRowsInFlight) {
