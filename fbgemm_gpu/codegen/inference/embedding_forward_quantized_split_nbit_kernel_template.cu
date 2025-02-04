@@ -125,11 +125,7 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
   }
 
   {% if not nobag %}
-    {% if PackedMode %}
-      VecNT<{{ (32 // emb_weight_type.bit_width) }}, PrimitiveType::{{ emb_weight_type.primitive_type }}> accumulators[OutputRowsPerThread][MaxNum128BRows*(7+MaxNum128BRows)/MaxNum128BRows];
-    {% else %}
-      VecNT<{{ (32 // emb_weight_type.bit_width) }}, PrimitiveType::{{ emb_weight_type.primitive_type }}> accumulators[OutputRowsPerThread][MaxNum128BRows];
-    {% endif %}
+  VecNT<{{ (32 // emb_weight_type.bit_width) }}, PrimitiveType::{{ emb_weight_type.primitive_type }}> accumulators[OutputRowsPerThread][MaxNum128BRows];
   {% endif %}
 
   for (uint32_t L_start = 0; L_start < max_Ls; L_start += InputRowsInFlight) {
@@ -149,10 +145,10 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
       uint32_t row_load_idx = load_idx % NumUint4LoadsPerRow % uint4_loads_per_row;
             //  To do: write the condition of bag_size_offset depending on num_packed_bags_L
    
-      input_row_idx = num_packed_bags_L>1? (load_idx / NumUint4LoadsPerRow) % bag_size_offset: (load_idx / NumUint4LoadsPerRow); // 63/32 = 1% 1 = 0
+      uint32_t input_row_idx = (load_idx / NumUint4LoadsPerRow) % bag_size_offset;
       
-      const uint32_t packed_bag_idx_D = num_packed_bags_D > 1 ? (threadIdx.x % NumUint4LoadsPerRow) / uint4_loads_per_row : 0;
-      const uint32_t packed_bag_idx_L = num_packed_bags_L > 1 ? (threadIdx.x / NumUint4LoadsPerRow) / bag_size_offset : 0;
+      const uint32_t packed_bag_idx_D = (threadIdx.x % NumUint4LoadsPerRow) / uint4_loads_per_row;
+      const uint32_t packed_bag_idx_L = (threadIdx.x / NumUint4LoadsPerRow) / bag_size_offset;
       bool load_idx_valid = packed_bag_idx_D < num_packed_bags_D && packed_bag_idx_L < num_packed_bags_L;
       {%- if is_rocm %}
       constexpr uint32_t kMaxRowUnroll = 4;
@@ -201,7 +197,6 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
           bool valid = load_idx_valid && (L_start + input_row_idx < Ls[i]) && (idx_v[inner_i] != -1);
           uint4 data = valid ? row_data_v[inner_i] : zeros;
           buffers[warp_idx][i][input_row_idx + bag_size_offset *packed_bag_idx_L][row_load_idx + uint4_loads_per_row * packed_bag_idx_D] = data;
-          __syncthreads();
           {% if weighted %}
           buffers_indice_weights[warp_idx][i][input_row_idx] = valid ? indice_weights[indices_starts[i] + L_start + input_row_idx] : 0.0;
           {% endif %}
@@ -231,8 +226,7 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
         } else {
           row = reinterpret_cast<const uint4*>(&weights[0]);
         }
-        p_async_zfill_cg<sizeof(uint4)>(&buffers[warp_idx][i][input_row_idx + bag_size_offset *packed_bag_idx_L][row_load_idx + uint4_loads_per_row * packed_bag_idx_D] , &row[row_load_idx], valid);
-
+        cp_async_zfill_cg<sizeof(uint4)>(&buffers[warp_idx][i][input_row_idx + bag_size_offset * packed_bag_idx_L][row_load_idx + uint4_loads_per_row * packed_bag_idx_D] , &row[row_load_idx], valid);
         {% if weighted %}
         buffers_indice_weights[warp_idx][i][input_row_idx] = valid ? indice_weights[indices_starts[i] + L_start + input_row_idx] : 0.0;
         {% endif %}
@@ -247,95 +241,99 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
     const int32_t uints_per_row = 4 * uint4_loads_per_row;
     const int32_t packed_bag_idx_D = (threadIdx.x / uints_per_row) % num_packed_bags_D;
     input_rows_in_flight = shfl_sync(input_rows_in_flight, packed_bag_idx_D * uint4_loads_per_row);
-    
-    #pragma unroll OutputRowsPerThread
-    for(uint32_t i = 0; i < OutputRowsPerThread; ++i)
-    {
-      Ls[i] = shfl_sync(Ls[i], threadIdx.x / uints_per_row % num_packed_bags_D * uint4_loads_per_row);
-    }
-    for (uint32_t input_row_idx = 0; input_row_idx < input_rows_in_flight; ++input_row_idx) {
-      #pragma unroll OutputRowsPerThread
+    int32_t Ls_shfl[OutputRowsPerThread];
+    for(uint32_t k = 0; k < num_packed_bags_L ; ++k){
       for (uint32_t i = 0; i < OutputRowsPerThread; ++i) {
-        bool valid = L_start + input_row_idx < Ls[i];
-        if (!valid) {
-          continue;
-        }
-        const uint32_t* row = reinterpret_cast<const uint32_t*>(&buffers[warp_idx][i][input_row_idx][0]);
-        // const int32_t packed_bag_idx_D = (threadIdx.x / uints_per_row) % num_packed_bags_D;
-        // scale and bias are at the beginning of each row.
-        // rationale: have scale/shift at start since these get loaded first
-        // and then broadcasted around so it might speed up the first cache miss.
-        {% if emb_weight_type.primitive_type == "INT" %}
-        half2 shift_scale = reinterpret_cast<const half2*>(row)[(packed_bag_idx_D * uints_per_row)];
-        {% endif %}
-
-        {% if weighted %}
-        float row_weight = buffers_indice_weights[warp_idx][i][input_row_idx];
-        {% endif %}
-
-        using scalar_t = {{ emb_weight_type.cpp_type_name }};
-
-        {% if not nobag %}
-        #pragma unroll MaxNum128BRows
-        for (uint32_t j = 0; j < MaxNum128BRows; ++j) {
-          scalar_t v = reinterpret_cast<const scalar_t*>(row)[kWarpSize * j + threadIdx.x];
-          {% if weighted %}
-          accumulators[i][j].fma(v, {% if emb_weight_type.primitive_type == "INT" %} shift_scale, {% elif emb_weight_type.enum_name == "FP8" %} exponent_bits, exponent_bias, {% endif %} row_weight);
-          {% else %}
-          accumulators[i][j].add(v{% if emb_weight_type.primitive_type == "INT" %}, shift_scale {% elif emb_weight_type.enum_name == "FP8" %}, exponent_bits, exponent_bias {% endif %});
-          {% endif %}
-        }
-        {% else %}
-        const int32_t output_j = indices_starts[i] + L_start + input_row_idx;
-        if constexpr (std::is_same_v<output_t, float> || std::is_same_v<output_t, at::Half> || std::is_same_v<output_t, at::BFloat16>) {
-          #pragma unroll MaxNum128BRows
-          for (uint32_t j = 0; j < MaxNum128BRows; ++j) {
-            // Read the uint8/4/2 values: note that first 4 Bytes will be ditched later:
-            // We shift back by 4/8/16 elements to remove the first 4 Bytes (which is garbage due to
-            // the scale/shift handling).
-            // Reason: to avoid divergence the first thread in the warp computes garbage.
-            const int32_t output_d = kWarpSize * j * kOutputsPerThread + threadIdx.x * kOutputsPerThread - D_padding;
-            scalar_t v = reinterpret_cast<const scalar_t*>(row)[kWarpSize * j + threadIdx.x];
-            if (output_d >= 0 && output_d < D) {
-              const int num_valid_outputs = min(static_cast<int>(D - output_d), static_cast<int>({{ (32 // emb_weight_type.bit_width) }}));
-              VecNT<{{ (32 // emb_weight_type.bit_width) }}, PrimitiveType::{{ emb_weight_type.primitive_type }}> acc(v{% if emb_weight_type.primitive_type == "INT" %}, shift_scale {% elif emb_weight_type.enum_name == "FP8" %}, exponent_bits, exponent_bias {% endif %});
-              acc.store(&output[output_j][output_d], num_valid_outputs);
-            }
-          }
-        } else if constexpr (std::is_same_v<output_t, uint8_t>) {
-          // INT8:
-          // apply per feature row-wise int8
-          auto thread_local_min = std::numeric_limits<float>::max();
-          auto thread_local_max = std::numeric_limits<float>::lowest();
-          float2 qparams;
-          #pragma unroll MaxNum128BRows
-          for (uint32_t j = 0; j < MaxNum128BRows; ++j) {
-            int32_t output_d = kWarpSize * j * kOutputsPerThread + threadIdx.x * kOutputsPerThread - D_padding;
-            scalar_t v = reinterpret_cast<const scalar_t*>(row)[kWarpSize * j + threadIdx.x];
-            VecNT<{{ (32 // emb_weight_type.bit_width) }}, PrimitiveType::{{ emb_weight_type.primitive_type }}> acc(v{% if emb_weight_type.primitive_type == "INT" %}, shift_scale {% elif emb_weight_type.enum_name == "FP8" %}, exponent_bits, exponent_bias {% endif %});
-            if (output_d >= 0 && output_d < D) {
-              thread_local_max = max(thread_local_max, float{{ (32 // emb_weight_type.bit_width) }}_max(acc.acc));
-              thread_local_min = min(thread_local_min, float{{ (32 // emb_weight_type.bit_width) }}_min(acc.acc));
-            }
-          }
-          qparams = warp_find_qparams(thread_local_min, thread_local_max);
-          #pragma unroll MaxNum128BRows
-          for (uint32_t j = 0; j < MaxNum128BRows; ++j) {
-            const int32_t output_d = kWarpSize * j * kOutputsPerThread + threadIdx.x * kOutputsPerThread - D_padding;
-            scalar_t v = reinterpret_cast<const scalar_t*>(row)[kWarpSize * j + threadIdx.x];
-            if (output_d >= 0 && output_d < D) {
-              const int num_valid_outputs = min(static_cast<int>(D - output_d), static_cast<int>({{ (32 // emb_weight_type.bit_width) }}));
-              VecNT<{{ (32 // emb_weight_type.bit_width) }}, PrimitiveType::{{ emb_weight_type.primitive_type }}> acc(v{% if emb_weight_type.primitive_type == "INT" %}, shift_scale {% elif emb_weight_type.enum_name == "FP8" %}, exponent_bits, exponent_bias {% endif %});
-              acc.store(&output[output_j][output_d], qparams, num_valid_outputs);
-            }
-          }
-          if (threadIdx.x == 0) {
-            store_qparams_to_row(&output[output_j][D], qparams);
-          }
-        }
-        {% endif %}
+        Ls_shfl[i] = shfl_sync(Ls[i], k * bag_size_offset * NumUint4LoadsPerRow + packed_bag_idx_D * uint4_loads_per_row);
       }
     }
+    for(uint32_t k = 0; k < num_packed_bags_L ; ++k){
+      for (uint32_t input_row_idx = 0; input_row_idx < input_rows_in_flight; ++input_row_idx) {
+
+          #pragma unroll OutputRowsPerThread
+          for (uint32_t i = 0; i < OutputRowsPerThread; ++i) {
+            bool valid = L_start + input_row_idx < Ls_shfl[i];
+            if (!valid) {
+              continue;
+            }
+            const uint32_t* row = reinterpret_cast<const uint32_t*>(&buffers[warp_idx][i][k*bag_size_offset*input_row_idx][0]);
+
+            // const int32_t packed_bag_idx_D = (threadIdx.x / uints_per_row) % num_packed_bags_D;
+            // scale and bias are at the beginning of each row.
+            // rationale: have scale/shift at start since these get loaded first
+            // and then broadcasted around so it might speed up the first cache miss.
+            {% if emb_weight_type.primitive_type == "INT" %}
+            half2 shift_scale = reinterpret_cast<const half2*>(row)[(packed_bag_idx_D * uints_per_row)];
+            {% endif %}
+
+            {% if weighted %}
+            float row_weight = buffers_indice_weights[warp_idx][i][input_row_idx];
+            {% endif %}
+
+            using scalar_t = {{ emb_weight_type.cpp_type_name }};
+
+            {% if not nobag %}
+            #pragma unroll MaxNum128BRows
+            for (uint32_t j = 0; j < MaxNum128BRows; ++j) {
+              scalar_t v = reinterpret_cast<const scalar_t*>(row)[kWarpSize * j + threadIdx.x];
+              {% if weighted %}
+              accumulators[i][j].fma(v, {% if emb_weight_type.primitive_type == "INT" %} shift_scale, {% elif emb_weight_type.enum_name == "FP8" %} exponent_bits, exponent_bias, {% endif %} row_weight);
+              {% else %}
+              accumulators[i][j].add(v{% if emb_weight_type.primitive_type == "INT" %}, shift_scale {% elif emb_weight_type.enum_name == "FP8" %}, exponent_bits, exponent_bias {% endif %});
+              {% endif %}
+            }
+            {% else %}
+            const int32_t output_j = indices_starts[i] + L_start + input_row_idx;
+            if constexpr (std::is_same_v<output_t, float> || std::is_same_v<output_t, at::Half> || std::is_same_v<output_t, at::BFloat16>) {
+              #pragma unroll MaxNum128BRows
+              for (uint32_t j = 0; j < MaxNum128BRows; ++j) {
+                // Read the uint8/4/2 values: note that first 4 Bytes will be ditched later:
+                // We shift back by 4/8/16 elements to remove the first 4 Bytes (which is garbage due to
+                // the scale/shift handling).
+                // Reason: to avoid divergence the first thread in the warp computes garbage.
+                const int32_t output_d = kWarpSize * j * kOutputsPerThread + threadIdx.x * kOutputsPerThread - D_padding;
+                scalar_t v = reinterpret_cast<const scalar_t*>(row)[kWarpSize * j + threadIdx.x];
+                if (output_d >= 0 && output_d < D) {
+                  const int num_valid_outputs = min(static_cast<int>(D - output_d), static_cast<int>({{ (32 // emb_weight_type.bit_width) }}));
+                  VecNT<{{ (32 // emb_weight_type.bit_width) }}, PrimitiveType::{{ emb_weight_type.primitive_type }}> acc(v{% if emb_weight_type.primitive_type == "INT" %}, shift_scale {% elif emb_weight_type.enum_name == "FP8" %}, exponent_bits, exponent_bias {% endif %});
+                  acc.store(&output[output_j][output_d], num_valid_outputs);
+                }
+              }
+            } else if constexpr (std::is_same_v<output_t, uint8_t>) {
+              // INT8:
+              // apply per feature row-wise int8
+              auto thread_local_min = std::numeric_limits<float>::max();
+              auto thread_local_max = std::numeric_limits<float>::lowest();
+              float2 qparams;
+              #pragma unroll MaxNum128BRows
+              for (uint32_t j = 0; j < MaxNum128BRows; ++j) {
+                int32_t output_d = kWarpSize * j * kOutputsPerThread + threadIdx.x * kOutputsPerThread - D_padding;
+                scalar_t v = reinterpret_cast<const scalar_t*>(row)[kWarpSize * j + threadIdx.x];
+                VecNT<{{ (32 // emb_weight_type.bit_width) }}, PrimitiveType::{{ emb_weight_type.primitive_type }}> acc(v{% if emb_weight_type.primitive_type == "INT" %}, shift_scale {% elif emb_weight_type.enum_name == "FP8" %}, exponent_bits, exponent_bias {% endif %});
+                if (output_d >= 0 && output_d < D) {
+                  thread_local_max = max(thread_local_max, float{{ (32 // emb_weight_type.bit_width) }}_max(acc.acc));
+                  thread_local_min = min(thread_local_min, float{{ (32 // emb_weight_type.bit_width) }}_min(acc.acc));
+                }
+              }
+              qparams = warp_find_qparams(thread_local_min, thread_local_max);
+              #pragma unroll MaxNum128BRows
+              for (uint32_t j = 0; j < MaxNum128BRows; ++j) {
+                const int32_t output_d = kWarpSize * j * kOutputsPerThread + threadIdx.x * kOutputsPerThread - D_padding;
+                scalar_t v = reinterpret_cast<const scalar_t*>(row)[kWarpSize * j + threadIdx.x];
+                if (output_d >= 0 && output_d < D) {
+                  const int num_valid_outputs = min(static_cast<int>(D - output_d), static_cast<int>({{ (32 // emb_weight_type.bit_width) }}));
+                  VecNT<{{ (32 // emb_weight_type.bit_width) }}, PrimitiveType::{{ emb_weight_type.primitive_type }}> acc(v{% if emb_weight_type.primitive_type == "INT" %}, shift_scale {% elif emb_weight_type.enum_name == "FP8" %}, exponent_bits, exponent_bias {% endif %});
+                  acc.store(&output[output_j][output_d], qparams, num_valid_outputs);
+                }
+              }
+              if (threadIdx.x == 0) {
+                store_qparams_to_row(&output[output_j][D], qparams);
+              }
+            }
+            {% endif %}
+          }
+        }
+              
   }
 
   {% if not nobag %}
@@ -395,7 +393,7 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
   }
   {% endif %}
 }
-
+}
 // kWarpsPerBlock is defined in embedding_forward_quantized_split_nbit_host_template.cu
 {% set warps_per_block = '4' %}
 
