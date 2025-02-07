@@ -341,7 +341,7 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
     const int32_t num_stores_with_padding_per_row = 4 * uint4_loads_per_row; 
     const int32_t packed_bag_idx_D = (threadIdx.x / num_stores_with_padding_per_row);
     for(uint32_t k = 0; k < num_packed_bags_L ; ++k){
-      const uint32_t b = min(static_cast<uint32_t>((bb * num_packed_bags_D * OutputRowsPerThread) + (i * num_packed_bags_D) + packed_bag_idx_D), static_cast<uint32_t>(B - 1));
+      uint32_t b = min(static_cast<uint32_t>(bb * tot_num_packed_bags * OutputRowsPerThread + i * tot_num_packed_bags + k*num_packed_bags_D + packed_bag_idx_D), static_cast<uint32_t>(B - 1));
       const float inv_L = (mean_pooling && Ls[i] != 0) ? static_cast<float>(1.0) / Ls[i] : static_cast<float>(1.0);
 
       if constexpr (std::is_same_v<output_t, float> || std::is_same_v<output_t, at::Half> || std::is_same_v<output_t, at::BFloat16>) {
