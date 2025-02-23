@@ -361,6 +361,7 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
               }
 
             }
+      
         } else if constexpr (std::is_same_v<output_t, uint8_t>) {
           // INT8:
           // apply per feature row-wise int8
@@ -395,10 +396,17 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
           // INT4: not implemented yet
         }
       }
+
+      for (uint32_t i = 0; i < OutputRowsPerThread; ++i) {
+          for (uint32_t j = 0; j < AccumulateStoreRequests; ++j) {
+              accumulators[i][j].mul(0.0);  // Use a dedicated clear method
+          }
+      }
+    
       
       {% endif %}
   }
-                }
+ }
 }
 // kWarpsPerBlock is defined in embedding_forward_quantized_split_nbit_host_template.cu
 {% set warps_per_block = '4' %}
