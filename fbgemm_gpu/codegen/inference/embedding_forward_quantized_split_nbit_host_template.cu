@@ -10,6 +10,7 @@
 {%- set wdesc =  "weighted" if weighted else "unweighted" %}
 #include "fbgemm_gpu/embedding_forward_template_helpers.cuh"
 #include "fbgemm_gpu/utils/tensor_accessor.h"
+#include "fbgemm_gpu/config/feature_gates.h"
 
 using namespace fbgemm_gpu;
 using Tensor = at::Tensor;
@@ -23,7 +24,7 @@ namespace nbit {
   same generated source file.
 */
 {%- for emb_weight_type in ["FP32", "FP16", "FP8", "INT8", "INT4", "INT2"] %}
-template<typename index_t, typename output_t, size_t OutputRowsPerThread, size_t WarpsPerBlock, size_t InputRowsInFlight, size_t MinNum128BRows, size_t MaxNum128BRows, bool DeviceOnly>
+template<typename index_t, typename output_t, size_t OutputRowsPerThread, size_t WarpsPerBlock, size_t InputRowsInFlight, size_t MinNum128BRows, size_t MaxNum128BRows, bool DeviceOnly, bool PackedMode, bool PackedMode_L>
 __launch_bounds__(WarpsPerBlock * kWarpSize)
 __global__ void {{ type_map[emb_weight_type].enum_name }}_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{{ wdesc }}_kernel_small_L(
   const pta::PackedTensorAccessor64<uint8_t, 1, at::RestrictPtrTraits> dev_weights,
@@ -50,6 +51,7 @@ __global__ void {{ type_map[emb_weight_type].enum_name }}_split_embedding{{ "_no
   const int fp8_exponent_bits,
   const int fp8_exponent_bias,
   {%- endif %}
+  const int32_t num_packed_bags,
   const int32_t num_packed_bags_D,
   const int32_t num_packed_bags_L,
   pta::PackedTensorAccessor32<output_t, 2, at::RestrictPtrTraits> output, // [B][total_D],
@@ -72,23 +74,9 @@ __global__ void {{ type_map[emb_weight_type].enum_name }}_split_embedding{{ "_no
     #endif
 
     // Define {{ emb_weight_type }} kernel invocation macro
-    #define X(DeviceOnly, OutputRowsPerThread, InputRowsInFlight, MinNum128BRows, MaxNum128BRows) \
-    {%-if is_rocm and not nobag and not weighted %}
-    const int32_t num_uint4_loads_per_row = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_D, SparseType::{{ emb_weight_type }}, row_alignment), sizeof(uint4)); \
-    constexpr int32_t NumUint4LoadsPerRow = MaxNum128BRows * 128 / sizeof(uint4); \
-    constexpr int32_t max_indices_per_warp = kWarpSize / NumUint4LoadsPerRow; \
-    const int64_t max_L = max_Ls; \
-    const int32_t num_packed_bags_L = max_indices_per_warp > max_L ?  max_indices_per_warp / max_L : 1; \
-    const int32_t num_packed_bags_D = NumUint4LoadsPerRow > num_uint4_loads_per_row && !std::is_same_v<output_t, uint8_t> && SparseType::{{ emb_weight_type }} != SparseType::FP32 ? NumUint4LoadsPerRow / num_uint4_loads_per_row : 1; \
-    const int32_t num_packed_bags = NumUint4LoadsPerRow > num_uint4_loads_per_row && !std::is_same_v<output_t, uint8_t> && SparseType::{{ emb_weight_type }} != SparseType::FP32 ? NumUint4LoadsPerRow / num_uint4_loads_per_row : 1; \
-    {%- else %}
-    const int32_t num_packed_bags_D = 1; \
-    const int32_t num_packed_bags_L = 1; \
-    const int32_t num_packed_bags = 1; \
-    {%- endif %}
-    const int32_t tot_packed_bags = num_packed_bags_D * num_packed_bags_L; \
-    {{ func_name }}<index_t, output_t, OutputRowsPerThread, kWarpsPerBlock, InputRowsInFlight, MinNum128BRows, MaxNum128BRows, DeviceOnly><<< \
-        nbit::div_round_up(T * nbit::div_round_up(B, tot_packed_bags * OutputRowsPerThread), kWarpsPerBlock), \
+    #define X(DeviceOnly, PackedMode,  PackedMode_L, OutputRowsPerThread, InputRowsInFlight, MinNum128BRows, MaxNum128BRows) \
+    {{ func_name }}<index_t, output_t, OutputRowsPerThread, kWarpsPerBlock, InputRowsInFlight, MinNum128BRows, MaxNum128BRows, DeviceOnly, PackedMode, PackedMode_L><<< \
+        nbit::div_round_up(T * nbit::div_round_up(B, num_packed_bags * OutputRowsPerThread), kWarpsPerBlock), \
         dim3(kWarpSize, kWarpsPerBlock), \
         0, \
         at::cuda::getCurrentCUDAStream()>>>( \
@@ -102,7 +90,7 @@ __global__ void {{ type_map[emb_weight_type].enum_name }}_split_embedding{{ "_no
         {%- else %}
         D, \
         {%- endif %}
-        FixedDivisor(div_round_up(B, tot_packed_bags * OutputRowsPerThread)), \
+        FixedDivisor(div_round_up(B, num_packed_bags * OutputRowsPerThread)), \
         MAKE_PTA_WITH_NAME(func_name_{{ emb_weight_type }}, indices, index_t, 1, 32), \
         MAKE_PTA_WITH_NAME(func_name_{{ emb_weight_type }}, offsets, index_t, 1, 32), \
         {%- if not nobag %}
@@ -116,6 +104,7 @@ __global__ void {{ type_map[emb_weight_type].enum_name }}_split_embedding{{ "_no
         fp8_exponent_bits, \
         fp8_exponent_bias, \
         {%- endif %}
+        num_packed_bags, \
         num_packed_bags_D, \
         num_packed_bags_L, \
         MAKE_PTA_WITH_NAME(func_name_{{ emb_weight_type }}, output, output_t, 2, 32), \
@@ -249,13 +238,43 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
 
     constexpr int32_t kWarpsPerBlock = 4;
     const auto device_only = lxu_cache_weights.numel() == 0 && uvm_weights.numel() == 0;
-    
-    // const auto max_ls = max_Ls;
+    /*
+     * Helper macro for run-time packed mode dispatch. Computes maximum number of bags
+     * (num_packed_bags) that fits into NumUint4LoadsPerRow given embeddings' type and 
+     * size. num_packed_bags is to be used for additional bags indexing 
+     *
+     * Current support range: ROCm and output_t != uint8_t and sparse_type != FP32
+     */
+    #define PACKED_MODE_SWITCH(dev_only, OutputRowsPerThread, InputRowsInFlight, MinNum128BRows, MaxNum128BRows) \
+      int32_t num_packed_bags = 1;    \
+      int32_t num_packed_bags_D = 1;  \
+      int32_t num_packed_bags_L = 1;  \
+      const int64_t max_L = max_Ls;   \
+      {%-if is_rocm and not nobag %}
+      const static bool use_packed_bag_mode = fbgemm_gpu::config::is_feature_enabled( \
+        fbgemm_gpu::config::FeatureGateName::TBE_ROCM_INFERENCE_PACKED_BAGS);         \
+      if(use_packed_bag_mode) {                                                       \
+        const int32_t num_uint4_loads_per_row = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_D, sparse_type, row_alignment), sizeof(uint4)); \
+        constexpr int32_t NumUint4LoadsPerRow = MaxNum128BRows * 128 / sizeof(uint4); \
+        constexpr int32_t max_indices_per_warp = kWarpSize / NumUint4LoadsPerRow; \
+        num_packed_bags_L = max_indices_per_warp > max_L && !std::is_same_v<output_t, uint8_t> && sparse_type != SparseType::FP32?  max_indices_per_warp / max_L : 1; \
+        num_packed_bags_D = NumUint4LoadsPerRow > num_uint4_loads_per_row && !std::is_same_v<output_t, uint8_t> && sparse_type != SparseType::FP32 ? NumUint4LoadsPerRow / num_uint4_loads_per_row : 1; \
+        num_packed_bags = num_packed_bags_L>1 ? num_packed_bags_D * num_packed_bags_L : num_packed_bags_D; \
+      } \
+      {%- endif %}
+      if (num_packed_bags > 1 && num_packed_bags_L>1) {              \
+        X(dev_only, true, true, OutputRowsPerThread, InputRowsInFlight, MinNum128BRows, MaxNum128BRows)        \
+      } else if (num_packed_bags > 1 && num_packed_bags_L<=1) {              \
+        X(dev_only, true, false, OutputRowsPerThread, InputRowsInFlight, MinNum128BRows, MaxNum128BRows)        \
+      } else {                                \
+        X(dev_only, false, false, OutputRowsPerThread, InputRowsInFlight, MinNum128BRows, MaxNum128BRows)       \
+      };
+
     #define Y(...) \
       if (device_only) { \
-        X(true, __VA_ARGS__) \
+        PACKED_MODE_SWITCH(true, __VA_ARGS__) \
       } else { \
-        X(false, __VA_ARGS__) \
+        PACKED_MODE_SWITCH(false, __VA_ARGS__) \
       };
 
 
@@ -269,7 +288,8 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
       if (max_int2_D > 0) {
         const auto max_D = max_int2_D;
         const auto max_Ls = INT2_max_ls;
-        auto max_int2_128b_rows = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_int2_D, SparseType::INT2, row_alignment), 128);
+        constexpr auto sparse_type = SparseType::INT2;
+        auto max_int2_128b_rows = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_D, sparse_type, row_alignment), 128);
         TORCH_CHECK(max_int2_128b_rows <= 8);
         if (max_int2_128b_rows > 0) {
           Y(2, 16, 0, 1);
@@ -298,14 +318,22 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
       if (max_int4_D > 0) {
         const auto max_D = max_int4_D;
         const auto max_Ls = INT4_max_ls;
-        auto max_int4_128b_rows = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_int4_D, SparseType::INT4, row_alignment), 128);
+        constexpr auto sparse_type = SparseType::INT4;
+        auto max_int4_128b_rows = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_D, sparse_type, row_alignment), 128);
         TORCH_CHECK(max_int4_128b_rows <= 16);
+        
+        {%- if is_rocm %}
+        if (max_int4_128b_rows > 0) {
+          Y(2, 8, 0, 2);
+        }
+        {%- else %}
         if (max_int4_128b_rows > 0) {
           Y(4, 8, 0, 1);
         }
         if (max_int4_128b_rows > 1) {
           Y(2, 8, 1, 2);
         }
+        {%- endif %}
         if (max_int4_128b_rows > 2) {
           Y(1, 4, 2, 4);
         }
@@ -313,7 +341,12 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
           Y(1, 4, 4, 8);
         }
         if (max_int4_128b_rows > 8) {
+          {%- if is_rocm %}
+          Y(1, 2, 8, 16);
+          {%- else %}
           Y(1, 4, 8, 16);
+          {%- endif %}
+
         }
       }
     }));
@@ -330,14 +363,21 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
       if (max_int8_D > 0) {
         const auto max_D = max_int8_D;
         const auto max_Ls = INT8_max_ls;
-        auto max_int8_128b_rows = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_int8_D, SparseType::INT8, row_alignment), 128);
+        constexpr auto sparse_type = SparseType::INT8;
+        auto max_int8_128b_rows = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_D, sparse_type, row_alignment), 128);
         TORCH_CHECK(max_int8_128b_rows <= 32);
+       {%- if is_rocm %}
+        if (max_int8_128b_rows > 0) {
+          Y(2, 4, 0, 2);
+        }
+        {%- else %}
         if (max_int8_128b_rows > 0) {
           Y(2, 8, 0, 1);
         }
         if (max_int8_128b_rows > 1) {
           Y(2, 4, 1, 2);
         }
+        {%- endif %}
         if (max_int8_128b_rows > 2) {
           Y(2, 4, 2, 4);
         }
@@ -345,10 +385,18 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
           Y(2, 4, 4, 8);
         }
         if (max_int8_128b_rows > 8) {
+          {%- if is_rocm %}
+          Y(1, 2, 8, 16);
+          {%- else %}
           Y(2, 2, 8, 16);
+          {%- endif %}
         }
         if (max_int8_128b_rows > 16) {
+          {%- if is_rocm %}
+          Y(1, 1, 16, 32);
+          {%- else %}
           Y(1, 2, 16, 32);
+          {%- endif %}
         }
       }
     }));
@@ -365,7 +413,8 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
       if (max_float8_D > 0) {
         const auto max_D = max_float8_D;
         const auto max_Ls = FP8_max_ls;
-        auto max_fp8_128b_rows = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_float8_D, SparseType::FP8, row_alignment), 128);
+        constexpr auto sparse_type = SparseType::FP8;
+        auto max_fp8_128b_rows = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_D, sparse_type, row_alignment), 128);
         TORCH_CHECK(max_fp8_128b_rows <= 32);
         if (max_fp8_128b_rows > 0) {
           Y(2, 8, 0, 1);
@@ -400,7 +449,8 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
       if (max_float16_D > 0) {
         const auto max_D = max_float16_D;
         const auto max_Ls = FP16_max_ls;
-        auto max_fp16_128b_rows = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_float16_D, SparseType::FP16, row_alignment), 128);
+        constexpr auto sparse_type = SparseType::FP16;
+        auto max_fp16_128b_rows = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_D, sparse_type, row_alignment), 128);
         TORCH_CHECK(max_fp16_128b_rows <= 64);
         if (max_fp16_128b_rows > 0) {
           Y(2, 8, 0, 2);
@@ -435,7 +485,8 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
       if (max_float32_D > 0) {
         const auto max_D = max_float32_D;
         const auto max_Ls = FP32_max_ls;
-        auto max_fp32_128b_rows = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_float32_D, SparseType::FP32, row_alignment), 128);
+        constexpr auto sparse_type = SparseType::FP32;
+        auto max_fp32_128b_rows = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_D, sparse_type, row_alignment), 128);
         TORCH_CHECK(max_fp32_128b_rows <= 64); // 128 doesn't fit in 48KB SM, so FP32 TBE supports a smaller dimension than others
         if (max_fp32_128b_rows > 0) {
           Y(2, 4, 0, 4);
