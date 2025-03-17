@@ -55,7 +55,12 @@ except Exception:
 
 import fbgemm_gpu  # noqa
 
-
+def find_max_ls(ty: SparseType, weights_tys:List[SparseType], offsets: Tensor )-> int:
+    bag_sizes = offsets[1:] - offsets[:-1]
+    for type_ in weights_tys:
+        if type_ == ty or type_.value == ty.value:
+            return bag_sizes.max().item()
+    return  0
 def rounded_row_size_in_bytes(
     dim: int,
     weight_ty: SparseType,
@@ -933,25 +938,16 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         indices, offsets, per_sample_weights = inputs_to_device(
             indices, offsets, per_sample_weights, self.bounds_check_warning.device
         )
-        # bag_sizes = offsets[1:] - offsets[:-1]
-        # max_Ls = bag_sizes.max()
-        max_ls_tys = []
         weights_tys: List[SparseType] = [e[3] for e in self.embedding_specs]
-        def find_max_ls(ty: SparseType):
-            bag_sizes = None
-            for type_ in weights_tys:
-                if type_ == ty or type_.value == ty.value:
-                    bag_sizes = offsets[1:] - offsets[:-1]
-                    return bag_sizes.max()
-                
-            return 0
-        type_list  = [SparseType.INT2, SparseType.INT4, SparseType.INT8, SparseType.FP8, SparseType.FP16, SparseType.FP32]
-        INT2_max_ls = find_max_ls(SparseType.INT2)
-        INT4_max_ls = find_max_ls(SparseType.INT4)
-        INT8_max_ls = find_max_ls(SparseType.INT8)
-        FP8_max_ls = find_max_ls(SparseType.FP8)
-        FP16_max_ls = find_max_ls(SparseType.FP16)
-        FP32_max_ls = find_max_ls(SparseType.FP32)
+       
+        INT2_max_ls = find_max_ls(SparseType.INT2, weights_tys, offsets)
+        INT4_max_ls = find_max_ls(SparseType.INT4, weights_tys, offsets)
+        INT8_max_ls = find_max_ls(SparseType.INT8, weights_tys, offsets)
+        FP8_max_ls = find_max_ls(SparseType.FP8, weights_tys, offsets)
+        FP16_max_ls = find_max_ls(SparseType.FP16, weights_tys, offsets)
+        FP32_max_ls = find_max_ls(SparseType.FP32, weights_tys, offsets)
+
+   
 
    
 
