@@ -15,8 +15,6 @@
 #include <tuple>
 #include <type_traits>
 #include "./CodeGenHelpers.h" // @manual
-#include "./RefImplementations.h" // @manual
-#include "./TransposeUtils.h" // @manual
 #include "fbgemm/Fbgemm.h"
 #include "fbgemm/QuantUtilsAvx512.h"
 #include "fbgemm/SimdUtils.h"
@@ -1025,8 +1023,7 @@ void fbgemmGroupwiseConv(
 
   if constexpr (SPATIAL_DIM == 1) {
     throw std::runtime_error("Groupwise 1D not implemented!");
-  }
-  if constexpr (SPATIAL_DIM == 2) {
+  } else if constexpr (SPATIAL_DIM == 2) {
     // Parallelization:
     int64_t batch_start = 0;
     int64_t batch_end = MB;
@@ -1145,7 +1142,7 @@ void fbgemmGroupwiseConv(
       } // for each g
     } // for each i
   } else {
-    assert(SPATIAL_DIM == 3 && "Unsupported SPATIAL_DIM");
+    static_assert(SPATIAL_DIM == 3, "Unsupported SPATIAL_DIM");
 
     conv_param_t<> conv_p_2d(
         conv_param.MB,

@@ -6,18 +6,13 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-#include <ATen/ATen.h>
-#include <torch/library.h>
-
-#include "c10/core/ScalarType.h"
-
-#include <ATen/cuda/CUDAEvent.h>
-#include <algorithm>
-#include <atomic>
-#include <cassert>
-#include <cmath>
-#include <string>
 #include <vector>
+
+#include <ATen/ATen.h>
+#include <ATen/cuda/CUDAEvent.h>
+#include <fbgemm_gpu/torch_ops.h>
+#include <torch/library.h>
+#include "c10/core/ScalarType.h"
 #include "c10/util/Exception.h"
 
 #if (defined(USE_ROCM) && ROCM_VERSION >= 60200)
@@ -31,6 +26,7 @@ namespace fbgemm_gpu {
 #ifdef USE_ROCM
 // flush icache
 void flush_icache_ck();
+
 #endif
 
 // SmoothQuant kernels
@@ -339,6 +335,7 @@ TORCH_LIBRARY_IMPL(fbgemm, CUDA, m) {
 
 #ifdef USE_ROCM
   m.impl("flush_icache_hip", flush_icache_ck);
+  m.impl("f8f8bf16_rowwise_grouped_mm", f8f8bf16_rowwise_grouped_mm);
 #endif
 #ifdef USE_ROCM
   m.impl("f8f8f16_rowwise", f8f8f16_rowwise);

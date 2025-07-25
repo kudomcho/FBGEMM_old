@@ -7,6 +7,7 @@
 # pyre-unsafe
 import functools
 import logging
+import os
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -28,6 +29,8 @@ from triton import Config  # @manual
 from triton.runtime.jit import reinterpret as tl_reinterpret, TensorWrapper  # @manual
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+running_on_github: bool = os.getenv("GITHUB_ENV") is not None
 
 try:
     # pyre-ignore[21]
@@ -73,7 +76,7 @@ def get_fp8_constants() -> Tuple[torch.dtype, tl.dtype, float, float]:
         max_fp8 (float): The maximum reprsentable value for the fp8 datatype.
         eps (float): Minimum clip value to prevent divide by zero.
     """
-    if supports_float8_fnuz():
+    if supports_float8_fnuz(throw_on_hip_incompatibility=(not running_on_github)):
         pt_fp8_dtype = torch.float8_e4m3fnuz
         tl_fp8_dtype = tl.float8e4b8
     else:
@@ -3616,7 +3619,7 @@ def prune_configs(configs, named_args, **kwargs):
         if modv != 0:
             continue
         # skip large GROUP_M
-        if GROUP_M * BLOCK_SIZE_M > M and GROUP_M != 1:
+        if GROUP_M * BLOCK_SIZE_M >= M and GROUP_M != 1:
             continue
         # out of shared memory resource
         # TODO (zhanglx): This does not consider the LDS usage in the epilogue
@@ -3638,7 +3641,7 @@ def prune_configs(configs, named_args, **kwargs):
 
         pruned_configs.append(config)
 
-    print(f"{len(configs)=} {len(pruned_configs)=}")
+    print(f"{len(configs)=} {len(pruned_configs)=} for {M=} {N=} {K=}")
     if len(pruned_configs) == 0:
         if not FORCE_FAILURE_ON_EMPTY_CONFIGS:
             # Prune configs that can lead to incorrect results even if all configs are sub-optimal.
@@ -3760,6 +3763,20 @@ MATMUL_CONFIGS_NON_PERSISTENT_PINGPONG_4K_8K_16K = [
     triton.Config(
         {
             "BLOCK_M": 256,
+            "BLOCK_N": 256,
+            "BLOCK_K": 128,
+            "GROUP_M": 1,
+            "SPLIT_K": 1,
+            "waves_per_eu": 0,
+            "matrix_instr_nonkdim": 32,
+            "kpack": 2,
+        },
+        num_warps=8,
+        num_stages=2,
+    ),
+    triton.Config(
+        {
+            "BLOCK_M": 256,
             "BLOCK_N": 128,
             "BLOCK_K": 128,
             "GROUP_M": 4,
@@ -3788,9 +3805,37 @@ MATMUL_CONFIGS_NON_PERSISTENT_PINGPONG_4K_8K_16K = [
     triton.Config(
         {
             "BLOCK_M": 128,
+            "BLOCK_N": 128,
+            "BLOCK_K": 64,
+            "GROUP_M": 1,
+            "SPLIT_K": 1,
+            "waves_per_eu": 2,
+            "matrix_instr_nonkdim": 16,
+            "kpack": 2,
+        },
+        num_warps=4,
+        num_stages=2,
+    ),
+    triton.Config(
+        {
+            "BLOCK_M": 128,
             "BLOCK_N": 64,
             "BLOCK_K": 64,
             "GROUP_M": 4,
+            "SPLIT_K": 1,
+            "waves_per_eu": 0,
+            "matrix_instr_nonkdim": 16,
+            "kpack": 2,
+        },
+        num_warps=4,
+        num_stages=2,
+    ),
+    triton.Config(
+        {
+            "BLOCK_M": 128,
+            "BLOCK_N": 64,
+            "BLOCK_K": 64,
+            "GROUP_M": 1,
             "SPLIT_K": 1,
             "waves_per_eu": 0,
             "matrix_instr_nonkdim": 16,
@@ -3918,7 +3963,7 @@ def _kernel_matmul_fp8_row_non_persistent(
     width = GROUP_M * grid_n
     group_id = pid // width
     group_size = min(grid_m - group_id * GROUP_M, GROUP_M)
-    pid_m = group_id * GROUP_M + (pid % group_size)
+    pid_m = group_id * GROUP_M + ((pid % width) % group_size)
     pid_n = (pid % width) // (group_size)
     tl.assume(pid_m >= 0)
     tl.assume(pid_n >= 0)

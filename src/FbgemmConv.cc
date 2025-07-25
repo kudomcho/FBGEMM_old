@@ -140,9 +140,6 @@ int fbgemmConv(
     case optimized_conv_t::depthwise: {
       // 2D and 3D depthwise fast path
       // std::cout << "Depthwise fast path" << std::endl;
-      const std::int32_t* B_zero_point = outProcess.getBZeroPoint();
-      const float* C_multiplier = outProcess.getCMultiplier();
-      const float* act_times_w_scale = outProcess.getActWScale();
       if constexpr (SPATIAL_DIM == 3) {
         static_assert(
             std::is_same_v<typename processOutputType::outType, std::uint8_t>,
@@ -153,6 +150,9 @@ int fbgemmConv(
             processOutputType::QGRANType == QuantizationGranularity::GROUP ||
             processOutputType::QGRANType ==
                 QuantizationGranularity::OUT_CHANNEL) {
+          const std::int32_t* B_zero_point = outProcess.getBZeroPoint();
+          const float* C_multiplier = outProcess.getCMultiplier();
+          const float* act_times_w_scale = outProcess.getActWScale();
           depthwise_3d_same_pad<processOutputType::QGRANType>(
               *reinterpret_cast<const conv_param_t<3>*>(&conv_p),
               outProcess.getAZeroPoint(),
@@ -180,6 +180,9 @@ int fbgemmConv(
             processOutputType::QGRANType == QuantizationGranularity::GROUP ||
             processOutputType::QGRANType ==
                 QuantizationGranularity::OUT_CHANNEL) {
+          const std::int32_t* B_zero_point = outProcess.getBZeroPoint();
+          const float* C_multiplier = outProcess.getCMultiplier();
+          const float* act_times_w_scale = outProcess.getActWScale();
           depthwise_2d_same_pad<processOutputType::QGRANType>(
               conv_p.MB, // mini batch
               conv_p.IN_DIM[0], // H
@@ -268,17 +271,21 @@ int fbgemmConv(
     case optimized_conv_t::directconv: {
       // specialized direct convolution path
       // std::cout << "Directconv fast path" << std::endl;
-      fbgemmDirectConv<SPATIAL_DIM, processOutputType::QGRANType>(
-          conv_p,
-          // Aint8,
-          activations,
-          *(packed_weights.getPackedWForDirectconv()),
-          out,
-          outBuffer,
-          outProcess,
-          outProcess.getBias(),
-          thread_id,
-          num_threads);
+      if constexpr (SPATIAL_DIM == 2) {
+        fbgemmDirectConv<SPATIAL_DIM, processOutputType::QGRANType>(
+            conv_p,
+            // Aint8,
+            activations,
+            *(packed_weights.getPackedWForDirectconv()),
+            out,
+            outBuffer,
+            outProcess,
+            outProcess.getBias(),
+            thread_id,
+            num_threads);
+      } else {
+        assert(false && "1d/3d direct conv not supported");
+      }
       break;
     }
     case optimized_conv_t::fastpath1d: {

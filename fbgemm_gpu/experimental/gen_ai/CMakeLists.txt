@@ -10,7 +10,7 @@
 
 cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
 
-set(CMAKEMODULES ${CMAKE_CURRENT_SOURCE_DIR}/../../../cmake/modules)
+set(CMAKEMODULES ${CMAKE_CURRENT_LIST_DIR}/../../../cmake/modules)
 include(${CMAKEMODULES}/Utilities.cmake)
 include(${CMAKEMODULES}/GpuCppLibrary.cmake)
 
@@ -27,26 +27,26 @@ set(CMAKE_VERBOSE_MAKEFILE ON)
 ################################################################################
 
 glob_files_nohip(experimental_gen_ai_cpp_source_files_cpu
-  src/attention/*.cpp
+  src/attention/cuda/*.cpp
   src/coalesce/*.cpp
+  src/comm/*.cpp
+  src/moe/*.cpp
   src/quantize/*.cpp
   src/quantize/common/*.cpp)
 
 glob_files_nohip(experimental_gen_ai_cpp_source_files_gpu
-  src/attention/*.cu
+  src/attention/cuda/*.cu
   src/coalesce/*.cu
+  src/comm/*.cu
+  src/moe/*.cu
   src/quantize/*.cu)
 
 if(FBGEMM_BUILD_VARIANT STREQUAL BUILD_VARIANT_CUDA)
   glob_files_nohip(tmp_list_cpu
-    src/comm/*.cpp
-    src/gather_scatter/*.cpp
-    src/moe/*.cpp)
+    src/gather_scatter/*.cpp)
 
   glob_files_nohip(tmp_list_gpu
-    src/comm/*.cu
-    src/gather_scatter/*.cu
-    src/moe/*.cu)
+    src/gather_scatter/*.cu)
 
   # TODO: kv_cache sources need to be updated with proper CUDA_VERSION ifdef
   # wrapping before this if-clause can be removed
@@ -135,6 +135,7 @@ gpu_cpp_library(
   INCLUDE_DIRS
     ${fbgemm_sources_include_directories}
     ${CMAKE_CURRENT_SOURCE_DIR}/src/quantize
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/quantize/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src/quantize/common/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src/kv_cache
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include

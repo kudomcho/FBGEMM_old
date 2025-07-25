@@ -6,8 +6,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <cassert>
 #include <iostream>
-#include "./CodeGenHelpers.h" // @manual
 #include "./GenerateKernel.h" // @manual
 
 namespace fbgemm {
