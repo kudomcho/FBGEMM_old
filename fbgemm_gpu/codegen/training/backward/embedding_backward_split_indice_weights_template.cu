@@ -188,13 +188,13 @@ __global__ __launch_bounds__(kForwardMaxThreads) void
         // Load gradients
         // TODO: Maybe using a combination of shared memory and registers is
         // better for performance
-        #pragma unroll kFixedMaxVecsPerThread
+        #pragma unroll 
         for (int32_t vec = 0; vec < kFixedMaxVecsPerThread && {{ d }} < D; ++vec) {
             const int32_t d = {{ d }};
             Vec4TAcc<grad_t> go(grad_output_ + d);
             grad_out[vec] = go;
         }
-
+        
         for (int32_t l_start = 0; l_start < L; l_start += kWarpSize) {
             auto l = l_start + threadIdx.x;
             const auto offset_idx = l < L
@@ -214,7 +214,7 @@ __global__ __launch_bounds__(kForwardMaxThreads) void
                 2, offset_idx + D_emb <= weights_numel, offset_idx
             )
             {%- endif %}
-
+            
             for (auto j = 0; j < kWarpSize && l_start + j < L; ++j) {
                 const auto offset_idx_j = shfl_sync(offset_idx, j);
                 {%- if not dense %}
@@ -225,7 +225,7 @@ __global__ __launch_bounds__(kForwardMaxThreads) void
                 [[maybe_unused]] const auto weight_row =
                     WeightRowAccessor<emb_t, at::acc_type<cache_t, true>>(&weights[offset_idx_j], D);
 
-                #pragma unroll kFixedMaxVecsPerThread
+                
                 for (int32_t vec = 0;
                     vec < kFixedMaxVecsPerThread && {{ d }} < D;
                     ++vec) {
@@ -430,8 +430,8 @@ Tensor {{ mdesc }}_embedding_codegen_grad_indice_weights{{ vdesc }}_cuda(
                         cache_t,
                         index_t,
                         kFixedMaxVecsPerThread>),
-                    div_round_up(total_B, kForwardMaxThreads / kWarpSize),
-                    dim3(kWarpSize, kForwardMaxThreads / kWarpSize),
+                    div_round_up(total_B, kForwardMaxThreads / (kWarpSize*2)),
+                    dim3(kWarpSize, kForwardMaxThreads / (kWarpSize*2)),
                     0,
                     at::cuda::getCurrentCUDAStream(),
                     PTA_B(grad_output_reshaped, grad_t, 2, 64),
