@@ -214,7 +214,7 @@ __global__ __launch_bounds__(kForwardMaxThreads) void
                 2, offset_idx + D_emb <= weights_numel, offset_idx
             )
             {%- endif %}
-            
+
             for (auto j = 0; j < kWarpSize && l_start + j < L; ++j) {
                 const auto offset_idx_j = shfl_sync(offset_idx, j);
                 {%- if not dense %}
@@ -431,7 +431,7 @@ Tensor {{ mdesc }}_embedding_codegen_grad_indice_weights{{ vdesc }}_cuda(
                         index_t,
                         kFixedMaxVecsPerThread>),
                     div_round_up(total_B, kForwardMaxThreads / (kWarpSize*2)),
-                    dim3(kWarpSize, kForwardMaxThreads / (kWarpSize*2)),
+                    dim3(kWarpSize, kForwardMaxThreads / (kWarpSize/2)),
                     0,
                     at::cuda::getCurrentCUDAStream(),
                     PTA_B(grad_output_reshaped, grad_t, 2, 64),

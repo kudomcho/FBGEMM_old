@@ -1066,7 +1066,7 @@ Tensor {{ embedding_cuda_op }}(
                     );
 
                     const int32_t cta_per_row_grid_size = std::min(
-                        div_round_up(total_unique_indices, (kMaxThreads2)),
+                        div_round_up(total_unique_indices, (kMaxThreads / 2)),
                         get_max_thread_blocks_());
 
                     FBGEMM_LAUNCH_KERNEL(
